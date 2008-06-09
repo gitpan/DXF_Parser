@@ -1,0 +1,395 @@
+#!/usr/bin/perl
+
+# DXF::toobj
+#
+# Copyright (c) 2007 Charles Williams <chas@cmf.nrl.navy.mil>
+# All rights reserved.
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the same terms as Perl itself.
+
+eval 'exec /usr/bin/perl -S $0 ${1+"$@"}'
+        if $running_under_some_shell;
+
+package DXF::toobj;
+
+use DXF::Parser;
+
+use strict;
+use vars qw(@ISA);
+
+@ISA = qw(DXF::Parser);
+
+# OBJ driver
+
+my $VERSION = '1.0';
+
+my $verbose = 0;
+my $debug = 0;
+my $arc_segments = 10;
+
+my $obj_vertices = 0;
+my $obj_faces = 0;
+my $obj_lines = 0;
+
+my $lastlayer = "";
+
+sub
+initialize
+{
+	my $self = shift;
+
+	# @@@ what do we do here?
+
+	$self->SUPER::initialize;
+}
+
+sub
+dxf_block
+{
+	my $self = shift;
+
+	$self->{SAVED} = $self->{OUTPUT};
+	open(BLOCK, ">/tmp/${name}.obj");	# add to list of files to remove at exit?
+	$self->{OUTPUT} = \*BLOCK;
+
+	$self->SUPER::dxf_block;
+}
+
+sub
+dxf_endblk
+{
+	my $self = shift;
+
+	$self->SUPER::dxf_endblk;
+
+	my $out_fh = $self->{OUTPUT};
+	close($out_fh);
+
+	$self->{OUTPUT} = $self->{SAVED};
+}
+
+sub
+dxf_insert
+{
+	my $self = shift;
+
+	$self->SUPER::dxf_insert;
+	
+        $self->import($name,
+		$DXF::Parser::x[0], $DXF::Parser::y[0], $DXF::Parser::z[0],
+		$DXF::Parser::float[1], $DXF::Parser::float[2], $DXF::Parser::float[3]) ||
+			$self->warn("INSERT: failed to find \"$name\" for insertion");
+}
+
+sub
+import
+{
+	my ($self, $name, $tx, $ty, $tz, $sx, $sy, $sz ) = @_;
+
+	my $n = 0;
+
+	my $out_fh = $self->{OUTPUT};
+
+	if (! -f "/tmp/$name.obj") {
+		$self->warn("BLOCK $name missing for INSERT (need to rerun?)\n");
+		return 0;
+	}
+
+	open(IMPORT, "</tmp/$name.obj");
+	while(<IMPORT>)
+	{
+		chop;
+		/^v/ && do {
+			my ($dummy, $x, $y, $z, $crap) = split;
+			$self->vertex($tx+($x*$sx), $ty+($y*$sy), $tz+($z*$sz));
+			++$n;
+		};
+
+		# pass comments and group information
+		/^[g#]/ && printf $out_fh "%s\n", $_;
+
+		/^[lf]/ && do
+		{
+			my $index;
+
+			my ($element, @indices) = split;
+			printf $out_fh "%s", $element;
+			foreach $index ( @indices )
+			{
+				if ($index < 0)
+					{ printf $out_fh " %d", $index; }
+				else
+					{ printf $out_fh " %d", ($index - $n) - 1; }
+			}
+			print $out_fh "\n";
+		};
+	}
+	close(IMPORT);
+	return 1;
+}
+
+sub
+open
+{
+	my ($self, $prefix) = @_;
+
+	open(OUTPUT, ">${prefix}.obj")
+		|| die "obj: failed to open ${prefix}.obj: $!\n";
+
+	$self->{OUTPUT} = \*OUTPUT;
+
+	$self->comment("dxftoobj (version $VERSION)");
+}
+
+sub
+close
+{
+	my $self = shift;
+
+	$debug && $self->comment("$obj_vertices points");
+	$debug && $self->comment("$obj_faces faces");
+	$debug && $self->comment("$obj_lines lines");
+
+	if ($verbose) {
+		printf ".obj statistics:\n";
+		printf "\t%d vertices\n", $obj_vertices;
+		printf "\t%d faces\n", $obj_faces;
+		printf "\t%d lines\n", $obj_lines;
+		printf "\n";
+	}
+
+	my $out_fh = $self->{OUTPUT};
+
+	close $out_fh;
+}
+
+sub
+group
+{
+	my ($self, $layer) = @_;
+
+	my $out_fh = $self->{OUTPUT};
+
+	if ($layer ne $lastlayer) {
+		printf $out_fh "g %s\n", $layer;
+		$lastlayer = $layer;
+	}
+}
+
+sub
+vertex
+{
+	my ($self, $x, $y, $z) = @_;
+	
+	++$obj_vertices;
+
+	my $out_fh = $self->{OUTPUT};
+	printf $out_fh "v %f %f %f\n", $x, $y, $z;
+}
+
+sub
+comment
+{
+	my ($self, $text) = @_;
+
+	my $out_fh = $self->{OUTPUT};
+
+	printf $out_fh "# %s\n", $text;
+}
+
+sub
+line
+{
+	my ($self, $object) = @_;
+
+	my $n = $object->{'n'};
+	my $x = $object->{'x'};
+	my $y = $object->{'y'};
+	my $z = $object->{'z'};
+	my $closed = $object->{'closed'};
+
+	my $i;
+	my $out_fh = $self->{OUTPUT};
+
+	++$obj_lines;
+
+	for( $i = 0; $i < $n; ++$i ) {
+		$self->vertex($$x[$i], $$y[$i], $$z[$i]);
+	}
+
+	# the .obj format doesn't support lines with more than 500 points
+	# so long lines should be broken into equal lengths
+
+	# XXX fix w/ recursion?
+	#   obj_line($n/2, $open, @pt[0..-n/2], @pt[n..(n+n/2)], ..
+	#   obj_line($n/2, $open, @pt[0..-n/2], @pt[n..(n+n/2)], ..
+
+	if ( $n > 500 )
+	{
+printf STDERR "line w/ more than 500 points (%d)\n", $n;
+		printf $out_fh "l";
+		for( $i = $n; $i > 500; --$i )
+		{
+			printf $out_fh " %d", -$i;
+		}
+		printf $out_fh "\n";
+
+		$n = 500;
+	}
+
+	printf $out_fh "l";
+	for( $i = $n; $i > 0; --$i )
+	{
+		printf $out_fh " %d", -$i;
+	}
+
+	$closed && printf $out_fh " %d", -$n;
+	printf $out_fh "\n";
+}
+
+sub
+polygon
+{
+	my ($self, $object) = @_;
+
+	my $n = $object->{'n'};
+	my $x = $object->{'x'};
+	my $y = $object->{'y'};
+	my $z = $object->{'z'};
+
+	my $i;
+
+	++$obj_faces;
+
+	for( $i = 0; $i < $n; ++$i ) {
+		$self->vertex($$x[$i], $$y[$i], $$z[$i]);
+	}
+
+	my $out_fh = $self->{OUTPUT};
+
+	printf $out_fh "f";
+	for( $i = $n; $i > 0; --$i )
+		{ printf $out_fh " %d", -$i; }
+	printf $out_fh "\n";
+}
+
+sub
+text
+{
+	my ($self, $object) = @_;
+
+	my $text = $object->{'text'};
+	my $x = $object->{'x'};
+	my $y = $object->{'y'};
+	my $z = $object->{'z'};
+	my $scale = $object->{'scale'};
+
+	# calls Wavefront's bit program to generate a text string
+	# the file is then "imported" to the current output file
+	# applying the needed translation and scales
+	# this generates large/complex objects due to the nature of
+	# fonts
+	$self->debug("OBJ: calling bit to build \"$text\" object");
+
+	if ( !defined $ENV{'WF_AV_DIR'} )
+	{
+		$self->warn("obj_text: WF_AV_DIR not set; cannot convert text");
+		return 0;
+	}
+
+	my $WF_AV_DIR = $ENV{'WF_AV_DIR'};
+		
+	unlink("text.obj");
+	system("echo \"$text\" | $WF_AV_DIR/bin/bit -L -a 8.0 -o text -q 0 -s swi_ult > /dev/null");
+
+	$self->import("text", $x, $y, $z, $scale/3, $scale/3, $scale/3);
+}
+
+# arc -- draw an arc.  arc_segments controls resolution of arc segments
+#
+# BUGS
+#   Converts arcs to a series of short line-segments
+#   Arc length (not $arc_segments) should control arc resolution
+#
+sub
+arc
+{
+	my ($self, $object) = @_;
+
+	my $x = $object->{'x'};
+	my $y = $object->{'y'};
+	my $z = $object->{'z'};
+	my $radius = $object->{'radius'};
+	my $angle1 = $object->{'angle1'};
+	my $angle2 = $object->{'angle2'};
+
+	my $i;
+
+	if ( $angle2 < $angle1 )
+		{ $angle2 += 360.0; }
+
+	# convert to radians...
+	my $degrees_to_radians = 3.1415/180.0;
+	$angle1 = $angle1 * $degrees_to_radians;
+	$angle2 = $angle2 * $degrees_to_radians;
+
+	my $delta = ($angle2 - $angle1)/($arc_segments-1);
+
+	for( $i = 0; $i < $arc_segments; ++$i )
+	{
+		my $theta = $angle1 + ($i * $delta);
+		$self->vertex($x+($radius*cos($theta)), $y+($radius*sin($theta)), $z);
+	}
+
+	my $out_fh = $self->{OUTPUT};
+
+	printf $out_fh "l ";
+	for( $i = $arc_segments; $i > 0; --$i )
+	{
+		printf $out_fh "%d ", -$i;
+	}
+	print $out_fh "\n";
+}
+
+sub
+circle
+{
+        my ($self, $object) = @_;
+
+	my $newobject = {
+		x => $object->{'x'},
+		y => $object->{'y'},
+		z => $object->{'z'},
+		radius => $object->{'radius'},
+		angle1 => 0.0,
+		angle2 => 360.0,
+	};
+
+	$self->arc($newobject);
+}
+
+my %options;
+
+my $dxffile;
+
+while ($_ = shift(@ARGV) )
+{
+        check:
+        {
+                /^--verbose/ && ($verbose = 1, last check);
+                /^--debug/ && ($debug = 1, last check);
+		/^--disable-text/ && ($options{disable_text} = 1, last check);
+                /^--arc-segments/ && do { ($arc_segments) = /.*=(\d+)/, last check };
+
+                /^-/ && do {print STDERR "unknown option \"$_\"\n"; last check};
+
+                $dxffile = $_;
+        }
+}
+
+$options{verbose} = $verbose;
+$options{debug} = $debug;
+
+my $parser = DXF::toobj->new(%options);
+$parser->parse_from_file($dxffile);

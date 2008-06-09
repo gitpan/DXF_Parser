@@ -1,0 +1,373 @@
+#!/usr/bin/perl
+
+# DXF::fig
+#
+# Copyright (c) 2007 Charles Williams <chas@cmf.nrl.navy.mil>
+# All rights reserved.
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the same terms as Perl itself.
+
+eval 'exec /usr/bin/perl -S $0 ${1+"$@"}'
+        if $running_under_some_shell;
+
+package DXF::fig;
+
+use DXF::Parser;
+
+use strict;
+use vars qw(@ISA);
+
+@ISA = qw(DXF::Parser);
+
+my $VERSION = '1.0';
+
+my $verbose = 0;
+my $debug = 0;
+my $figunits = 100; # 1200;
+
+my $degrees_to_radians = 3.1415/180.0;
+
+sub
+initialize
+{
+	my $self = shift;
+
+	# @@@ what do we do here?
+
+	$self->SUPER::initialize;
+}
+
+sub
+dxf_block
+{
+	my $self = shift;
+
+	$self->{SAVED} = $self->{OUTPUT};
+	open(BLOCK, ">/tmp/${name}.fig");	# add to list of files to remove at exit?
+	$self->{OUTPUT} = \*BLOCK;
+
+	$self->SUPER::dxf_block;
+}
+
+sub
+dxf_endblk
+{
+	my $self = shift;
+
+	$self->SUPER::dxf_endblk;
+
+	my $out_fh = $self->{OUTPUT};
+	close($out_fh);
+
+	$self->{OUTPUT} = $self->{SAVED};
+}
+
+sub
+dxf_insert
+{
+	my $self = shift;
+
+	$self->SUPER::dxf_insert;
+	
+	my $tx = $DXF::Parser::x[0];
+	my $ty = $DXF::Parser::y[0];
+	my $sx = $DXF::Parser::float[1];
+	my $sy = $DXF::Parser::float[2];
+
+	my $n = 0;
+	my $x;
+	my $y;
+
+	my $out_fh = $self->{_OUTPUT};
+
+	if (! -f "/tmp/$name.fig") {
+		$self->warn("BLOCK $name missing for INSERT (need to rerun?)\n");
+		return 0;
+	}
+
+	$sx = abs($sx);
+	$sy = abs($sy);
+
+printf $out_fh "#INSERT %s  translate %f %f scale %f %f\n", $name, $tx, $ty, $sx, $sy;
+	open(IMPORT, "</tmp/$name.fig");
+	while(<IMPORT>)
+	{
+		chop;
+case:
+	{
+		/^2 1 / && do {
+			printf $out_fh "%s\n", $_;
+
+			$_ = <IMPORT>;
+			chop;
+
+			printf $out_fh "\t";
+			my @points = split;
+			while ($#points > 0) {
+				$x = shift @points;
+				$y = shift @points;
+				printf $out_fh " %d %d", ($x * $sx) + ($tx * $figunits), ($y * $sy) - ($ty * $figunits);
+			}
+			printf $out_fh "\n";
+			printf $out_fh "#%s\n", $_;
+
+			last case;
+		};
+
+		/^2 3 / && do {
+			printf $out_fh "%s\n", $_;
+
+			$_ = <IMPORT>;
+			chop;
+
+			printf $out_fh "\t";
+			my @points = split;
+			while ($#points > 0) {
+				$x = shift @points;
+				$y = shift @points;
+				printf $out_fh " %d %d", ($x * $sx) + ($tx * $figunits), ($y * $sy) - ($ty * $figunits);
+			}
+			printf $out_fh "\n";
+			printf $out_fh "#%s\n", $_;
+
+			last case;
+		};
+
+		/^5 1 / && do {
+			my ($obj, $type, $line_style, $line_thickness, $pen_color, $fill_color, $depth,
+				$pen_style, $area_fill, $style_val, $cap_style, $direction, $forward_arrow,
+				$backward_arrow, $center_x, $center_y, $x1, $y1, $x2, $y2, $x3, $y3) = split;
+
+#		printf $out_fh "%d %d %d %d %d %d %d %d %d %f %d %d %d %d %d %d %d %d %d %d %d %d\n",
+#			$obj, $type, $line_style, $line_thickness, $pen_color, $fill_color,
+#			$depth, $pen_style, $area_fill, $style_val, $cap_style, $direction,
+#			$forward_arrow, $backward_arrow,
+#			$center_x * $sx + $tx, $center_y * $sy + $ty,
+#			$x1 * $sx + $tx, $y1 * $sy + $ty,
+#			$x2 * $sx + $tx, $y2 * $sy + $ty,
+#			$x3 * $sx + $tx, $y3 * $sy + $ty;
+			last case;
+		};
+
+		/^#/ && do {
+			printf $out_fh "%s\n", $_;
+			last case;
+		};
+
+		printf STDERR "unparsed line %s\n", $_;
+	}
+	}
+printf $out_fh "#END INSERT %s\n", $name;
+	close(IMPORT);
+	return 1;
+}
+
+sub
+open
+{
+	my ($self, $prefix) = @_;
+
+	open(OUTPUT, ">${prefix}.fig")
+		|| die "fig: failed to open ${prefix}.obj: $!\n";
+
+	$self->{OUTPUT} = \*OUTPUT;
+	$self->{_OUTPUT} = $self->{OUTPUT};
+
+	printf OUTPUT "#FIG 3.1\n";
+	printf OUTPUT "Landscape\n";	# orientation
+	printf OUTPUT "Center\n";	# justification
+	printf OUTPUT "Inches\n";	# units
+	printf OUTPUT "1200 2\n";	# figunits/inch coord_system (upper left)
+
+	# $self->comment("dxftofig (version $VERSION)");
+}
+
+sub
+close
+{
+	my $self = shift;
+
+	my $out_fh = $self->{OUTPUT};
+	close $out_fh;
+}
+
+sub
+comment
+{
+	my ($self, $text) = @_;
+
+	my $out_fh = $self->{OUTPUT};
+	printf $out_fh "# %s\n", $text;
+}
+
+#        -1 = Default
+#         0 = Solid
+#         1 = Dashed
+#         2 = Dotted
+#         3 = Dash-dotted
+#         4 = Dash-double-dotted
+#         5 = Dash-triple-dotted
+
+sub
+ltype_to_line_style
+{
+	my ($self, $ltype) = @_;
+
+	my $line_style = -1;
+
+	$ltype =~ /CONTINUOUS/ && ($line_style = 0);
+	$ltype =~ /HIDDEN/ && ($line_style = 2);
+	$ltype =~ /PHANTOM/ && ($line_style = 4);
+	$ltype =~ /CENTER/ && ($line_style = 3);
+	$ltype =~ /DASHED/ && ($line_style = 1);
+	$ltype =~ /DASHDOT/ && ($line_style = 3);
+
+	return $line_style;
+}
+
+sub
+line
+{
+	my ($self, $object) = @_;
+
+	my $i;
+	my $out_fh = $self->{OUTPUT};
+
+	my $n = $object->{'n'};
+	my $x = $object->{'x'};
+	my $y = $object->{'y'};
+	my $z = $object->{'z'};
+	my $closed = $object->{'closed'};
+	my $layer = $object->{'layer'};
+	my $ltype = $object->{'ltype'};
+
+	my $line_style = $self->ltype_to_line_style($ltype);
+	$line_style = -1;
+
+	printf $out_fh "2 1 0 1 0 7 50 %d -1 0.000 0 0 -1 0 0 %d\n", $line_style, $n;
+
+	printf $out_fh "\t";
+	for( $i = 0; $i < $n; ++$i ) {
+		printf $out_fh " %d %d", $$x[$i] * $figunits, - ($$y[$i] * $figunits);
+	}
+
+	#$closed && printf $out_fh " %d", -$n;
+
+	printf $out_fh "\n";
+}
+
+sub
+polygon
+{
+	my ($self, $object) = @_;
+
+	my $n = $object->{'n'};
+	my $x = $object->{'x'};
+	my $y = $object->{'y'};
+	my $z = $object->{'z'};
+
+	my $i;
+	my $out_fh = $self->{OUTPUT};
+ 
+	printf $out_fh "2 3 0 1 0 7 50 -1 -1 0.000 0 0 -1 0 0 %d\n", $n + 1;
+
+	printf $out_fh "\t";
+	for( $i = 0; $i < $n; ++$i ) {
+		printf $out_fh " %d %d", $$x[$i] * $figunits, - ($$y[$i] * $figunits);
+	}
+	printf $out_fh " %d %d\n", $$x[0] * $figunits, - ($$y[0] * $figunits);
+}
+
+sub
+text
+{
+	my ($self, $object) = @_;
+
+	my $text = $object->{'text'};
+	my $x = $object->{'x'};
+	my $y = $object->{'y'};
+	my $z = $object->{'z'};
+	my $scale = $object->{'scale'};
+	my $angle = $object->{'angle'};
+
+	my $out_fh = $self->{OUTPUT};
+
+	printf $out_fh "4 0 0 50 -1 4 %d %d 0 40 40 %d %d %s\\001\n",
+		$figunits * 8 * $scale / 100, $angle * $degrees_to_radians, $x * $figunits, - ($y * $figunits), $text;
+}
+
+sub
+arc
+{
+	my ($self, $object) = @_;
+
+	my $x = $object->{'x'};
+	my $y = $object->{'y'};
+	my $z = $object->{'z'};
+	my $radius = $object->{'radius'};
+	my $angle1 = $object->{'angle1'};
+	my $angle2 = $object->{'angle2'};
+	my $layer = $object->{'layer'};
+
+	my $out_fh = $self->{OUTPUT};
+
+	if ( $angle2 < $angle1 )
+		{ $angle2 += 360.0; }
+
+	$x = $x * $figunits;
+	$y = $y * $figunits;
+	$radius = $radius * $figunits;
+
+	my $x1 = $x + ($radius * cos($angle1 * $degrees_to_radians));
+	my $y1 = $y + ($radius * sin($angle1 * $degrees_to_radians));
+	my $x2 = $x + ($radius * cos((($angle1 + $angle2) / 2) * $degrees_to_radians));
+	my $y2 = $y + ($radius * sin((($angle1 + $angle2) / 2) * $degrees_to_radians));
+	my $x3 = $x + ($radius * cos($angle2 * $degrees_to_radians));
+	my $y3 = $y + ($radius * sin($angle2 * $degrees_to_radians));
+
+	printf $out_fh "5 1 0 1 0 7 50 -1 -1 0.000 0 0 0 0 %f %f %d %d %d %d %d %d\n",
+				$x, -($y), $x3, -($y3), $x2, -($y2), $x1, -($y1);
+}
+
+sub
+circle
+{
+	my ($self, $object) = @_;
+
+	my $x = $object->{'x'};
+	my $y = $object->{'y'};
+	my $z = $object->{'z'};
+	my $radius = $object->{'radius'};
+
+	my $out_fh = $self->{OUTPUT};
+
+	printf $out_fh "1 3 0 1 0 7 50 -1 -1 0.000 1 0.0 %d %d %d %d %d %d %d %d\n",
+		$x * $figunits, -($y * $figunits), $radius * $figunits, $radius * $figunits, $x * $figunits, -($y * $figunits),
+		$x * $figunits + $radius * $figunits, -($y * $figunits + $radius * $figunits);
+}
+
+my %options;
+
+my $dxffile;
+
+while ($_ = shift(@ARGV) )
+{
+        check:
+        {
+                /^--verbose/ && ($verbose = 1, last check);
+                /^--debug/ && ($debug = 1, last check);
+		/^--disable-text/ && ($options{disable_text} = 1, last check);
+		/^--fig-units/ && do { ($figunits) = /.*=(\d+)/, last check };
+
+                /^-/ && do {print STDERR "unknown option \"$_\"\n"; last check};
+
+                $dxffile = $_;
+        }
+}
+
+$options{verbose} = $verbose;
+$options{debug} = $debug;
+
+my $parser = DXF::fig->new(%options);
+$parser->parse_from_file($dxffile);

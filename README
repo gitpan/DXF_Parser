@@ -1,0 +1,12 @@
+DXF::Parser is based on a DXF to Alias|Wavefront .obj convertor I wrote
+quite some time ago.  I converted this utility into a module, so i could
+support other output formats easily.
+
+This is the first release of the DXF::Parser module.  Included are
+two sample drivers, dxftoobj and dxftoofig.  dxftofig has problems
+with scaling (since i dont know the dimensions of the drawing before
+conversion).
+
+Items on the TODO list:
+	. better support for BLOCK/INSERT
+	. color/attribute support during conversion
